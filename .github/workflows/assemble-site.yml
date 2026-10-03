@@ -1,0 +1,63 @@
+name: Assemble Arabic encyclopedia pages
+on:
+  push:
+    branches: [main]
+    paths: ['upload/manifest.json']
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: encyclopedia-assembly
+  cancel-in-progress: false
+jobs:
+  assemble:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: main
+      - name: Verify and extract the prepared static website
+        run: |
+          python3 - <<'PY'
+          import base64, hashlib, io, json, pathlib, subprocess, zipfile
+          root = pathlib.Path.cwd()
+          manifest = json.loads((root / 'upload/manifest.json').read_text())
+          encoded = ''
+          for part in manifest['parts']:
+              name = part['name']
+              if not name.startswith('upload/part-') or '..' in name:
+                  raise ValueError('Invalid package part path')
+              text = (root / name).read_text().strip()
+              if hashlib.sha256(text.encode()).hexdigest() != part['sha256']:
+                  raise ValueError('Package part checksum mismatch')
+              encoded += text
+          archive = base64.b64decode(encoded, validate=True)
+          if hashlib.sha256(archive).hexdigest() != manifest['sha256']:
+              raise ValueError('Archive checksum mismatch')
+          allowed = set(manifest['files'])
+          if len(allowed) > 100:
+              raise ValueError('Too many files')
+          with zipfile.ZipFile(io.BytesIO(archive)) as z:
+              if set(z.namelist()) != allowed:
+                  raise ValueError('Archive file list mismatch')
+              if sum(x.file_size for x in z.infolist()) > 10000000:
+                  raise ValueError('Archive is too large')
+              for name in sorted(allowed):
+                  path = pathlib.PurePosixPath(name)
+                  if path.is_absolute() or '..' in path.parts or any(p in {'.git', '.github', 'upload'} for p in path.parts):
+                      raise ValueError('Unsafe output path')
+                  if path.suffix not in {'.html', '.css', '.js', '.json', '.md', '.csv', '.svg'}:
+                      raise ValueError('Unexpected file type')
+                  data = z.read(name)
+                  data.decode('utf-8')
+                  target = root.joinpath(*path.parts)
+                  target.parent.mkdir(parents=True, exist_ok=True)
+                  target.write_bytes(data)
+          subprocess.run(['git','add','--',*sorted(allowed)],check=True)
+          subprocess.run(['git','config','user.name','github-actions[bot]'],check=True)
+          subprocess.run(['git','config','user.email','41898282+github-actions[bot]@users.noreply.github.com'],check=True)
+          if subprocess.run(['git','diff','--cached','--quiet']).returncode:
+              subprocess.run(['git','commit','-m','Publish verified Arabic encyclopedia chart files'],check=True)
+              subprocess.run(['git','push','origin','HEAD:main'],check=True)
+          print('Verified static website files are committed to main.')
+          PY
